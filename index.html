@@ -186,6 +186,18 @@
   .gate .err{color:var(--bad);font-size:12.5px;min-height:16px;margin:8px 2px 0;}
   .gate .save{display:flex;align-items:center;gap:8px;margin:14px 2px 0;font-size:12.5px;color:var(--ink-faint);}
   .hidden{display:none!important;}
+  .scan-hint{font-size:12.5px;color:var(--ink-dim);padding:4px 2px 10px;line-height:1.5;}
+  .scan-row{display:flex;align-items:center;gap:11px;width:100%;padding:12px 13px;border-radius:12px;border:1px solid var(--line);
+    background:var(--panel);margin-bottom:8px;cursor:pointer;}
+  .scan-row.pax{border-color:rgba(79,224,192,.55);background:rgba(79,224,192,.08);}
+  .scan-row .sig{display:flex;align-items:flex-end;gap:2px;height:20px;}
+  .scan-row .sig i{width:4px;border-radius:1px;background:var(--ink-faint);}
+  .scan-row.pax .sig i.on{background:var(--ready);}
+  .scan-row .sig i.on{background:var(--ink-dim);}
+  .scan-row .nm{flex:1;min-width:0;}
+  .scan-row .nm b{font-size:14px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .scan-row .nm span{font-size:11px;color:var(--ink-faint);font-family:var(--font-num);}
+  .scan-row .badge{font-size:10px;font-weight:700;letter-spacing:.1em;color:#0e0f12;background:var(--ready);padding:4px 8px;border-radius:6px;}
 </style>
 </head>
 <body>
@@ -265,6 +277,8 @@
 
   <!-- connect -->
   <button class="btn primary wide" id="connectBtn">Connect</button>
+  <button class="btn wide" id="scanBtn" style="margin-top:10px;border-color:rgba(79,224,192,.4);color:var(--ready)">🔍 Find my PAX (scan by signal)</button>
+  <div id="scanBox" style="display:none;margin-top:10px;"></div>
   <button class="btn danger wide hidden" id="disconnectBtn">Disconnect</button>
   <div class="hint" id="hint">Open in a Web‑Bluetooth browser (Bluefy on iPhone). Wake the PAX until the petals glow, then connect.</div>
 
@@ -359,6 +373,7 @@ function pStatus(list){
 
 /* ---------- BLE state ---------- */
 let device=null, writeChar=null, notifyChars=[];
+let wasPax=false, gotValidData=false, serialTimer=null, reconnectTries=0;
 
 async function connect(all=false){
   if(!navigator.bluetooth){
@@ -401,7 +416,19 @@ async function openGatt(){
   setStatus("Connecting…","busy");
   const server=await device.gatt.connect();
   log("GATT connected. Reading service…");
-  const svc=await server.getPrimaryService(SERVICE);
+  let svc;
+  try{
+    svc=await server.getPrimaryService(SERVICE);
+  }catch(err){
+    wasPax=false;
+    log("No PAX service on this device — it isn't your PAX.","er");
+    setStatus("Not a PAX","");
+    hint('That device wasn\'t the PAX. Tap <b>Connect</b> and choose a different one from the list.');
+    try{ device.gatt.disconnect(); }catch(_){}
+    return;
+  }
+  wasPax=true;
+  log("\u2713 PAX confirmed — found its service.","ok");
   const chars=await svc.getCharacteristics();
   log("Found "+chars.length+" characteristic(s).");
   writeChar=null; notifyChars=[];
@@ -423,6 +450,15 @@ async function openGatt(){
   // ask the device for its current state
   await send(pStatus([ATTR.ACTUAL_TEMP,ATTR.SET_POINT,ATTR.BATTERY,ATTR.LOCKED,
                       ATTR.BRIGHTNESS,ATTR.HEATING_STATE,ATTR.CURRENT_TARGET]),"status request");
+  // If we're truly on the PAX but get no readable data back, the serial (encryption key) is almost certainly wrong.
+  gotValidData=false;
+  clearTimeout(serialTimer);
+  serialTimer=setTimeout(()=>{
+    if(!gotValidData){
+      log("Connected, but no readable data — serial/key is likely wrong.","er");
+      hint('Connected to the PAX, but it\'s sending nothing readable — that almost always means the <b>serial is off by a character</b>. Tap <b>change</b> at the bottom and re-enter it exactly (watch 0/O, 8/B, 1/I, 5/S).');
+    }
+  },4500);
 }
 
 async function send(plain16,label){
@@ -444,6 +480,7 @@ async function onNotify(ev){
 
 function parse(b){
   const dv=new DataView(b.buffer); const type=dv.getUint8(0);
+  if([1,2,3,6,21,31,32].indexOf(type)>=0) gotValidData=true;   // readable → serial is correct
   switch(type){
     case ATTR.ACTUAL_TEMP:{ const f=cToF(dv.getUint16(1,true)/10); setActual(f); log("← oven "+f.toFixed(0)+"°F","rx"); break;}
     case ATTR.SET_POINT:
@@ -458,7 +495,17 @@ function parse(b){
   }
 }
 
-function onDrop(){ log("Device disconnected.","er"); onDisconnected(); }
+function onDrop(){
+  clearTimeout(serialTimer);
+  log("Device disconnected.","er");
+  onDisconnected();
+  if(wasPax && reconnectTries<2){
+    reconnectTries++;
+    log("Reconnecting\u2026 (try "+reconnectTries+")","t");
+    setStatus("Reconnecting\u2026","busy");
+    setTimeout(()=>{ if(device){ device.gatt.connect().then(()=>openGatt()).catch(e=>log("Reconnect failed: "+(e.message||e),"er")); } },1200);
+  }
+}
 function disconnect(){ if(device&&device.gatt.connected){ device.gatt.disconnect(); } onDisconnected(); }
 
 /* ---------- UI wiring ---------- */
@@ -469,6 +516,7 @@ function onConnected(){
   setStatus((device.name||"PAX 3"),"on");
   $("connectBtn").classList.add("hidden");
   $("disconnectBtn").classList.remove("hidden");
+  reconnectTries=0;
   ["setBtn","up","down","heatBtn","brightness"].forEach(id=>$(id).disabled=false);
   hint("Connected. Drag the ring or use −/+ to choose a temperature, then Set.");
 }
@@ -546,6 +594,84 @@ function log(msg,cls){
   $("logCount").textContent=(++logN);
 }
 
+
+/* ---------- Find my PAX: live signal scanner (Bluefy supports scanning) ---------- */
+let scanMap=new Map(), scanTimer=null, scanActive=false, advBound=false;
+function sigBars(rssi){ // rssi ~ -30 (close) .. -100 (far)
+  const q=Math.max(0,Math.min(4,Math.round((rssi+100)/17)));
+  let h="";for(let i=0;i<4;i++)h+=`<i class="${i<q?'on':''}" style="height:${6+i*4}px"></i>`;return h;
+}
+async function findPax(){
+  if(!navigator.bluetooth || !navigator.bluetooth.requestLEScan){
+    log("Scanning not supported by this browser.","er");
+    hint("This browser can't scan for signal. Make sure you're on the latest Bluefy — otherwise use <b>Connect</b> and tap the unnamed device.");
+    return;
+  }
+  if(scanActive){ stopScan(); return; }
+  try{
+    scanMap.clear(); scanActive=true;
+    $("scanBtn").textContent="◼ Stop scanning";
+    $("scanBox").style.display="block";
+    $("scanBox").innerHTML='<div class="scan-hint">Scanning… hold your phone right against the PAX with the petals lit. Whatever is closest rises to the top — the PAX shows a green ✓ if it broadcasts its ID.</div>';
+    if(!advBound){ navigator.bluetooth.addEventListener('advertisementreceived', onAdv); advBound=true; }
+    await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements:true, keepRepeatedDevices:true });
+    log("Scan started.","ok");
+    clearInterval(scanTimer); scanTimer=setInterval(renderScan,700);
+    setTimeout(()=>{ if(scanActive) stopScan(); }, 30000);
+  }catch(e){
+    scanActive=false; $("scanBtn").textContent="🔍 Find my PAX (scan by signal)";
+    log("Scan failed: "+(e.message||e),"er");
+    hint("Couldn't start scanning — Bluefy may need Bluetooth permission enabled in iOS Settings.");
+  }
+}
+function onAdv(ev){
+  try{
+    const id=ev.device.id;
+    const uuids=(ev.uuids||[]).map(u=>(""+u).toLowerCase());
+    const prev=scanMap.get(id)||{};
+    scanMap.set(id,{id, dev:ev.device, name:ev.device.name||prev.name||"", rssi:(ev.rssi!=null?ev.rssi:prev.rssi||-100),
+      isPax: uuids.includes(SERVICE) || prev.isPax || false});
+  }catch(e){}
+}
+function renderScan(){
+  const arr=[...scanMap.values()].sort((a,b)=> (b.isPax-a.isPax) || (b.rssi-a.rssi));
+  if(!arr.length){ return; }
+  let html='<div class="scan-hint">Closest first. Tap the PAX to connect.</div>';
+  arr.slice(0,12).forEach((d,i)=>{
+    html+=`<div class="scan-row ${d.isPax?'pax':''}" data-id="${d.id}">
+      <div class="sig">${sigBars(d.rssi)}</div>
+      <div class="nm"><b>${d.name|| (d.isPax?'PAX (unnamed)':'Unnamed device')}</b><span>${d.rssi} dBm${d.isPax?' · PAX service':''}</span></div>
+      ${d.isPax?'<span class="badge">✓ PAX</span>':''}
+    </div>`;
+  });
+  $("scanBox").innerHTML=html;
+  $("scanBox").querySelectorAll(".scan-row").forEach(row=>{
+    row.addEventListener("click",()=>connectScanned(row.dataset.id));
+  });
+}
+function stopScan(){
+  scanActive=false; clearInterval(scanTimer);
+  $("scanBtn").textContent="🔍 Find my PAX (scan by signal)";
+  try{ /* requestLEScan returns a scan obj we didn't keep; leaving it—Bluefy stops on nav. */ }catch(e){}
+}
+async function connectScanned(id){
+  const d=scanMap.get(id); if(!d) return;
+  stopScan();
+  log("Connecting to scanned device: "+(d.name||"(unnamed)"),"t");
+  // Try connecting to the scanned device directly first (Bluefy often allows this).
+  try{
+    device=d.dev; device.addEventListener("gattserverdisconnected",onDrop);
+    await openGatt(); return;
+  }catch(e){ log("Direct connect blocked, opening picker…","t"); }
+  // Fallback: request by exact name if we have one, else by service.
+  try{
+    const filters = d.name ? [{name:d.name}] : [{services:[SERVICE]}];
+    device = await navigator.bluetooth.requestDevice({ filters, optionalServices:[SERVICE] });
+    device.addEventListener("gattserverdisconnected",onDrop);
+    await openGatt();
+  }catch(e){ log("Connect failed: "+(e.message||e),"er"); hint('In the list, tap the device named <b>'+(d.name||"(unnamed)")+'</b>.'); }
+}
+
 /* ---------- boot ---------- */
 function startApp(serial){
   buildKey(serial).then(k=>{KEY=k; log("Key ready for serial "+serial,"ok");});
@@ -598,6 +724,7 @@ window.addEventListener("DOMContentLoaded",()=>{
 
   // connect
   $("connectBtn").addEventListener("click",()=>connect(false));
+  $("scanBtn").addEventListener("click",findPax);
   $("disconnectBtn").addEventListener("click",disconnect);
 
   // log tools
