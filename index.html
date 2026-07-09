@@ -369,19 +369,18 @@ async function connect(all=false){
   }
   try{
     setStatus("Requesting…","busy");
-    log("Opening device picker"+(all?" (all devices)":"")+"…");
-    const opts = all
-      ? { acceptAllDevices:true, optionalServices:[SERVICE] }
-      : { filters:[{namePrefix:"PAX"}], optionalServices:[SERVICE] };
-    device = await navigator.bluetooth.requestDevice(opts);
+    log("Opening device picker (all nearby devices)…");
+    // Show every nearby BLE device — the PAX 3 doesn't always advertise under a "PAX" name,
+    // so filtering by name can hide it. Pick your PAX from the list (it may show as the
+    // serial, "PAX3", or an unnamed device).
+    device = await navigator.bluetooth.requestDevice({ acceptAllDevices:true, optionalServices:[SERVICE] });
     log("Picked: "+(device.name||"(unnamed)")+"  id="+device.id.slice(0,8),"ok");
     device.addEventListener("gattserverdisconnected",onDrop);
     await openGatt();
   }catch(e){
     if(e && e.name==="NotFoundError"){
-      log("No device chosen / none matched.","t");
-      hint('Nothing matched “PAX”. <a href="#" id="allLink">Show all devices →</a>');
-      $("allLink") && $("allLink").addEventListener("click",ev=>{ev.preventDefault();connect(true);});
+      log("Picker closed with no device selected.","t");
+      hint('No device picked. Make sure the PAX is awake (petals lit) and not connected to anything else, then tap Connect again.');
     }else{
       log("Connect error: "+(e.message||e),"er");
     }
