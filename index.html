@@ -374,6 +374,7 @@ function pStatus(list){
 /* ---------- BLE state ---------- */
 let device=null, writeChar=null, notifyChars=[];
 let wasPax=false, gotValidData=false, serialTimer=null, reconnectTries=0;
+let readChars=[], pollTimer=null;
 
 async function connect(all=false){
   if(!navigator.bluetooth){
@@ -431,13 +432,14 @@ async function openGatt(){
   log("\u2713 PAX confirmed — found its service.","ok");
   const chars=await svc.getCharacteristics();
   log("Found "+chars.length+" characteristic(s).");
-  writeChar=null; notifyChars=[];
+  writeChar=null; notifyChars=[]; readChars=[];
   for(const c of chars){
     const p=c.properties, tag=c.uuid.slice(4,8);
     const kinds=[p.write&&"write",p.writeWithoutResponse&&"writeNR",p.notify&&"notify",p.read&&"read"].filter(Boolean).join(",");
     log("  ·"+tag+"  ["+kinds+"]","t");
     if((p.write||p.writeWithoutResponse)&&!writeChar) writeChar=c;
     if(p.notify) notifyChars.push(c);
+    if(p.read) readChars.push(c);
   }
   if(!writeChar){ log("No writable characteristic — can't send commands.","er"); }
   for(const c of notifyChars){
@@ -450,15 +452,33 @@ async function openGatt(){
   // ask the device for its current state
   await send(pStatus([ATTR.ACTUAL_TEMP,ATTR.SET_POINT,ATTR.BATTERY,ATTR.LOCKED,
                       ATTR.BRIGHTNESS,ATTR.HEATING_STATE,ATTR.CURRENT_TARGET]),"status request");
-  // If we're truly on the PAX but get no readable data back, the serial (encryption key) is almost certainly wrong.
+  startPoll();   // actively poll temp/battery in case the PAX doesn't push notifications
   gotValidData=false;
   clearTimeout(serialTimer);
   serialTimer=setTimeout(()=>{
     if(!gotValidData){
-      log("Connected, but no readable data — serial/key is likely wrong.","er");
-      hint('Connected to the PAX, but it\'s sending nothing readable — that almost always means the <b>serial is off by a character</b>. Tap <b>change</b> at the bottom and re-enter it exactly (watch 0/O, 8/B, 1/I, 5/S).');
+      log("Connected & sending OK, but no readings received yet — read path issue, not the serial.","t");
     }
-  },4500);
+  },6000);
+}
+
+/* Poll: re-request status and directly read every readable characteristic, then parse. */
+function startPoll(){
+  clearInterval(pollTimer);
+  pollTimer=setInterval(async ()=>{
+    if(!device || !device.gatt || !device.gatt.connected){ clearInterval(pollTimer); return; }
+    try{ await send(pStatus([ATTR.ACTUAL_TEMP,ATTR.SET_POINT,ATTR.BATTERY,ATTR.HEATING_STATE]),"poll"); }catch(e){}
+    for(const c of readChars){
+      try{
+        const v=await c.readValue();
+        if(v && v.byteLength>16){
+          const dec=await decryptPacket(v.buffer);
+          log("read ·"+c.uuid.slice(4,8)+" ["+bytesToHex(dec.slice(0,Math.min(6,dec.length)))+"]","t");
+          parse(dec);
+        }
+      }catch(e){}
+    }
+  },3000);
 }
 
 async function send(plain16,label){
@@ -521,7 +541,7 @@ function onConnected(){
   hint("Connected. Drag the ring or use −/+ to choose a temperature, then Set.");
 }
 function onDisconnected(){
-  writeChar=null; notifyChars=[];
+  writeChar=null; notifyChars=[]; clearInterval(pollTimer);
   setStatus("Not connected","");
   $("connectBtn").classList.remove("hidden");
   $("disconnectBtn").classList.add("hidden");
