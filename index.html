@@ -375,7 +375,7 @@ function pStatus(list){
 /* ---------- BLE state ---------- */
 let device=null, writeChar=null, notifyChars=[];
 let wasPax=false, gotValidData=false, serialTimer=null, reconnectTries=0;
-let readChars=[], pollTimer=null, rxCount=0;
+let readChars=[], pollTimer=null, rxCount=0, seenTypes={}, charsSummary="";
 
 async function connect(all=false){
   if(!navigator.bluetooth){
@@ -443,7 +443,7 @@ async function openGatt(){
     if(p.read) readChars.push(c);
   }
   if(!writeChar){ log("No writable characteristic — can't send commands.","er"); }
-  setDiag("chars: "+chars.map(c=>c.uuid.slice(4,8)+"["+[c.properties.read&&'r',c.properties.write&&'w',c.properties.writeWithoutResponse&&'W',c.properties.notify&&'n'].filter(Boolean).join('')+"]").join("  ")+" · waiting for data…");
+  charsSummary="chars: "+chars.map(c=>c.uuid.slice(4,8)+"["+[c.properties.read&&'r',c.properties.write&&'w',c.properties.writeWithoutResponse&&'W',c.properties.notify&&'n'].filter(Boolean).join('')+"]").join("  "); seenTypes={}; renderDiag();
   for(const c of notifyChars){
     try{ await c.startNotifications();
       c.addEventListener("characteristicvaluechanged",onNotify);
@@ -510,9 +510,14 @@ async function onNotify(ev){
 }
 function setDiag(t){ const d=el("diag"); if(d) d.textContent=t; }
 
+function renderDiag(){
+  const ts=Object.keys(seenTypes).map(t=>t+":"+seenTypes[t]).join("  ");
+  setDiag((charsSummary?charsSummary+"  |  ":"")+(ts?("types "+ts):"waiting for data…"));
+}
 function parse(b){
   const dv=new DataView(b.buffer); const type=dv.getUint8(0);
   if([1,2,3,6,21,31,32].indexOf(type)>=0) gotValidData=true;   // readable → serial is correct
+  seenTypes[type]=bytesToHex(b.slice(0,8)); renderDiag();
   switch(type){
     case ATTR.ACTUAL_TEMP:{ const f=cToF(dv.getUint16(1,true)/10); setActual(f); log("← oven "+f.toFixed(0)+"°F","rx"); break;}
     case ATTR.SET_POINT:
