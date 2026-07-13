@@ -630,13 +630,14 @@ function onAdv(ev){
     const uuids=(ev.uuids||[]).map(u=>(""+u).toLowerCase());
     const prev=scanMap.get(id)||{};
     scanMap.set(id,{id, dev:ev.device, name:ev.device.name||prev.name||"", rssi:(ev.rssi!=null?ev.rssi:prev.rssi||-100),
-      isPax: uuids.includes(SERVICE) || prev.isPax || false});
+      isPax: uuids.includes(SERVICE) || prev.isPax || false, ts:Date.now()});
   }catch(e){}
 }
 function renderScan(){
-  const arr=[...scanMap.values()].sort((a,b)=> (b.isPax-a.isPax) || (b.rssi-a.rssi));
-  if(!arr.length){ return; }
-  let html='<div class="scan-hint">Closest first. Tap the PAX to connect.</div>';
+  const fresh=Date.now()-4000;
+  const arr=[...scanMap.values()].filter(d=>d.ts>=fresh).sort((a,b)=> (b.isPax-a.isPax) || (b.rssi-a.rssi));
+  if(!arr.length){ $("scanBox").innerHTML='<div class="scan-hint">Scanning\u2026 nothing in range yet. Wake the PAX and hold the phone against it.</div>'; return; }
+  let html='<div class="scan-hint">Closest first, live. <b>Trick:</b> note the top entries, then put the PAX to sleep \u2014 the one that vanishes is your PAX. Wake it and tap it.</div>';
   arr.slice(0,12).forEach((d,i)=>{
     html+=`<div class="scan-row ${d.isPax?'pax':''}" data-id="${d.id}">
       <div class="sig">${sigBars(d.rssi)}</div>
