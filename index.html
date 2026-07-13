@@ -414,24 +414,40 @@ async function connect(all=false){
   }
 }
 
+function withTimeout(promise, ms, label){
+  return Promise.race([
+    promise,
+    new Promise((_,rej)=>setTimeout(()=>{ const e=new Error("timeout"); e.__timeout=label; rej(e); }, ms))
+  ]);
+}
+
 async function openGatt(){
   setStatus("Connecting…","busy");
-  const server=await device.gatt.connect();
+  let server;
+  try{
+    server=await withTimeout(device.gatt.connect(), 12000, "GATT connect");
+  }catch(err){
+    return connectStalled(err);
+  }
   log("GATT connected. Reading service…");
   let svc;
   try{
-    svc=await server.getPrimaryService(SERVICE);
+    svc=await withTimeout(server.getPrimaryService(SERVICE), 10000, "service discovery");
   }catch(err){
+    if(err.__timeout) return connectStalled(err);
     wasPax=false;
     log("No PAX service on this device — it isn't your PAX.","er");
     setStatus("Not a PAX","");
     hint('That device wasn\'t the PAX. Tap <b>Connect</b> and choose a different one from the list.');
     try{ device.gatt.disconnect(); }catch(_){}
+    onDisconnected();
     return;
   }
   wasPax=true;
   log("\u2713 PAX confirmed — found its service.","ok");
-  const chars=await svc.getCharacteristics();
+  let chars;
+  try{ chars=await withTimeout(svc.getCharacteristics(), 8000, "characteristics"); }
+  catch(err){ return connectStalled(err); }
   log("Found "+chars.length+" characteristic(s).");
   writeChar=null; notifyChars=[]; readChars=[];
   for(const c of chars){
@@ -445,23 +461,30 @@ async function openGatt(){
   if(!writeChar){ log("No writable characteristic — can't send commands.","er"); }
   charsSummary="chars: "+chars.map(c=>c.uuid.slice(4,8)+"["+[c.properties.read&&'r',c.properties.write&&'w',c.properties.writeWithoutResponse&&'W',c.properties.notify&&'n'].filter(Boolean).join('')+"]").join("  "); seenTypes={}; renderDiag();
   for(const c of notifyChars){
-    try{ await c.startNotifications();
+    try{ await withTimeout(c.startNotifications(), 6000, "notify");
       c.addEventListener("characteristicvaluechanged",onNotify);
       log("Listening on ·"+c.uuid.slice(4,8),"ok");
-    }catch(e){ log("notify fail ·"+c.uuid.slice(4,8)+": "+e.message,"er"); }
+    }catch(e){ log("notify skip ·"+c.uuid.slice(4,8)+": "+(e.message||e),"er"); }
   }
   onConnected();
-  // ask the device for its current state
-  await send(pStatus([ATTR.ACTUAL_TEMP,ATTR.SET_POINT,ATTR.BATTERY,ATTR.LOCKED,
-                      ATTR.BRIGHTNESS,ATTR.HEATING_STATE,ATTR.CURRENT_TARGET]),"status request");
-  startPoll();   // actively poll temp/battery in case the PAX doesn't push notifications
+  try{ await send(pStatus([ATTR.ACTUAL_TEMP,ATTR.SET_POINT,ATTR.BATTERY,ATTR.LOCKED,
+                      ATTR.BRIGHTNESS,ATTR.HEATING_STATE,ATTR.CURRENT_TARGET]),"status request"); }catch(e){}
+  startPoll();
   gotValidData=false;
   clearTimeout(serialTimer);
   serialTimer=setTimeout(()=>{
-    if(!gotValidData){
-      log("Connected & sending OK, but no readings received yet — read path issue, not the serial.","t");
-    }
+    if(!gotValidData) log("Connected & sending OK, but no readings yet.","t");
   },6000);
+}
+
+function connectStalled(err){
+  const where=err&&err.__timeout?err.__timeout:"connection";
+  wasPax=false;   // stop auto-reconnect from looping the stall
+  log("Stalled at "+where+".","er");
+  setStatus("Stalled — reset PAX","");
+  hint('Connection stalled at <b>'+where+'</b>. Power‑cycle the PAX (hold the button until it powers off, wait 5s, turn on), then tap <b>Connect</b>. If it keeps stalling, toggle iPhone Bluetooth off/on and forget the PAX in iOS Settings → Bluetooth.');
+  try{ if(device&&device.gatt&&device.gatt.connected) device.gatt.disconnect(); }catch(_){}
+  onDisconnected();
 }
 
 /* Poll: re-request status and directly read every readable characteristic, then parse. */
