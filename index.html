@@ -246,6 +246,7 @@
       </div>
     </div>
     <div class="actual">Oven now: <b id="actualVal">—</b></div>
+    <div id="diag" style="font-family:var(--font-num);font-size:10px;line-height:1.5;color:#6b7280;text-align:center;margin-top:8px;padding:0 12px;word-break:break-all;"></div>
   </div>
 
   <!-- fine set -->
@@ -374,7 +375,7 @@ function pStatus(list){
 /* ---------- BLE state ---------- */
 let device=null, writeChar=null, notifyChars=[];
 let wasPax=false, gotValidData=false, serialTimer=null, reconnectTries=0;
-let readChars=[], pollTimer=null;
+let readChars=[], pollTimer=null, rxCount=0;
 
 async function connect(all=false){
   if(!navigator.bluetooth){
@@ -442,6 +443,7 @@ async function openGatt(){
     if(p.read) readChars.push(c);
   }
   if(!writeChar){ log("No writable characteristic — can't send commands.","er"); }
+  setDiag("chars: "+chars.map(c=>c.uuid.slice(4,8)+"["+[c.properties.read&&'r',c.properties.write&&'w',c.properties.writeWithoutResponse&&'W',c.properties.notify&&'n'].filter(Boolean).join('')+"]").join("  ")+" · waiting for data…");
   for(const c of notifyChars){
     try{ await c.startNotifications();
       c.addEventListener("characteristicvaluechanged",onNotify);
@@ -471,10 +473,15 @@ function startPoll(){
     for(const c of readChars){
       try{
         const v=await c.readValue();
+        const raw=new Uint8Array(v.buffer);
         if(v && v.byteLength>16){
           const dec=await decryptPacket(v.buffer);
-          log("read ·"+c.uuid.slice(4,8)+" ["+bytesToHex(dec.slice(0,Math.min(6,dec.length)))+"]","t");
+          rxCount++;
+          setDiag("READ ·"+c.uuid.slice(4,8)+"  raw"+raw.length+":"+bytesToHex(raw.slice(0,10))+"  dec:"+bytesToHex(dec.slice(0,10))+"  type="+dec[0]);
+          log("read ·"+c.uuid.slice(4,8)+" dec:"+bytesToHex(dec.slice(0,12)),"t");
           parse(dec);
+        } else if(v){
+          setDiag("READ ·"+c.uuid.slice(4,8)+"  raw"+raw.length+":"+bytesToHex(raw.slice(0,12))+" (too short to decode)");
         }
       }catch(e){}
     }
@@ -492,11 +499,16 @@ async function send(plain16,label){
 }
 
 async function onNotify(ev){
+  const raw=new Uint8Array(ev.target.value.buffer);
   try{
     const dec=await decryptPacket(ev.target.value.buffer);
+    rxCount++;
+    setDiag("NOTIFY ·"+ev.target.uuid.slice(4,8)+"  raw"+raw.length+":"+bytesToHex(raw.slice(0,10))+"  dec:"+bytesToHex(dec.slice(0,10))+"  type="+dec[0]);
+    log("← notify raw:"+bytesToHex(raw.slice(0,12))+" dec:"+bytesToHex(dec.slice(0,12)),"rx");
     parse(dec);
-  }catch(e){ log("decrypt error: "+(e.message||e),"er"); }
+  }catch(e){ setDiag("NOTIFY raw"+raw.length+":"+bytesToHex(raw.slice(0,12))+"  decrypt-error"); log("decrypt error: "+(e.message||e),"er"); }
 }
+function setDiag(t){ const d=el("diag"); if(d) d.textContent=t; }
 
 function parse(b){
   const dv=new DataView(b.buffer); const type=dv.getUint8(0);
